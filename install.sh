@@ -13,7 +13,9 @@ ELEPHANT_REPO="abenz1267/elephant"
 WALKER_REPO="abenz1267/walker"
 BIN_DIR="$HOME/.local/bin"
 PROVIDER_DIR="$HOME/.config/elephant/providers"
-STATE_DIR="$HOME/.local/share/ml4w-walker"
+REPO_URL="${ML4W_WALKER_REPO:-https://github.com/mylinuxforwork/ml4w-walker}"
+INSTALL_DIR="$HOME/.local/share/ml4w-walker"
+STATE_DIR="$HOME/.local/state/ml4w-walker"
 MANIFEST="$STATE_DIR/manifest"
 
 DEFAULT_PROVIDERS="desktopapplications,menus"
@@ -169,7 +171,7 @@ preflight() {
     arch="$(uname -m)"
     [ "$arch" = "x86_64" ] || die "Only x86_64 is supported (walker and elephant publish no $arch builds)."
 
-    for cmd in curl tar; do
+    for cmd in curl tar git; do
         command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required but not installed."
     done
 
@@ -299,6 +301,33 @@ resolve_tag() {
     esac
 }
 
+# Clone or update the ml4w-walker repository and link the ml4w-walker command
+install_self() {
+    # Earlier versions kept only the manifest in $INSTALL_DIR
+    if [ -f "$INSTALL_DIR/manifest" ] && [ ! -d "$INSTALL_DIR/.git" ]; then
+        mkdir -p "$STATE_DIR"
+        mv "$INSTALL_DIR/manifest" "$MANIFEST"
+        rmdir "$INSTALL_DIR" 2>/dev/null || true
+    fi
+
+    if [ -d "$INSTALL_DIR/.git" ] && [ -n "${ML4W_WALKER_MANAGED:-}" ]; then
+        # Called by ml4w-walker, which updates the repository itself in "update"
+        :
+    elif [ -d "$INSTALL_DIR/.git" ]; then
+        info "Updating ml4w-walker in $INSTALL_DIR"
+        git -C "$INSTALL_DIR" pull --ff-only --quiet || die "Could not update $INSTALL_DIR"
+    elif [ -d "$INSTALL_DIR" ]; then
+        die "$INSTALL_DIR exists but is not a git repository. Please remove or rename it and run this script again."
+    else
+        info "Cloning ml4w-walker into $INSTALL_DIR"
+        mkdir -p "$(dirname "$INSTALL_DIR")"
+        git clone --quiet "$REPO_URL" "$INSTALL_DIR" || die "Could not clone $REPO_URL"
+    fi
+
+    mkdir -p "$BIN_DIR"
+    ln -sf "$INSTALL_DIR/bin/ml4w-walker" "$BIN_DIR/ml4w-walker"
+}
+
 manifest_get() {
     [ -f "$MANIFEST" ] || return 0
     grep -E "^$1=" "$MANIFEST" | head -n1 | cut -d= -f2- || true
@@ -329,6 +358,7 @@ main() {
     normalize_providers
     detect_distro
     preflight
+    install_self
 
     local elephant_tag walker_tag old_elephant old_walker old_providers
     local update_elephant=0 update_walker=0 p
@@ -417,10 +447,11 @@ providers=$PROVIDERS
 EOF
         info "walker and elephant installed successfully."
 
-        if pgrep -x elephant >/dev/null 2>&1 || pgrep -x walker >/dev/null 2>&1; then
+        # ml4w-walker restarts them itself after update/add/remove
+        if [ -z "${ML4W_WALKER_MANAGED:-}" ] &&
+            { pgrep -x elephant >/dev/null 2>&1 || pgrep -x walker >/dev/null 2>&1; }; then
             info "elephant or walker is running. Restart both to use the new version:"
-            info "  pkill -x walker; pkill -x elephant"
-            info "  elephant & walker --gapplication-service &"
+            info "  ml4w-walker restart"
         fi
     fi
 
@@ -442,10 +473,11 @@ EOF
         fi
     done
 
-    info "Start both from your autostart (elephant must run before walker):"
-    info "  $BIN_DIR/elephant &"
-    info "  $BIN_DIR/walker --gapplication-service &"
-    info "Open the launcher with: walker"
+    if [ -z "${ML4W_WALKER_MANAGED:-}" ]; then
+        info "Start elephant and walker with: ml4w-walker start"
+        info "Add this line to your autostart to start them on login: $BIN_DIR/ml4w-walker"
+        info "Open the launcher with: walker"
+    fi
 }
 
 main "$@"

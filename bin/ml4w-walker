@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+#
+# Start, stop and update walker and elephant, and manage elephant providers
+#
+
+set -euo pipefail
+
+# The repository lives one level above this script. Resolve the symlink in
+# ~/.local/bin so the script also works from any other clone.
+INSTALL_DIR="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
+BIN_DIR="$HOME/.local/bin"
+PROVIDER_DIR="$HOME/.config/elephant/providers"
+STATE_DIR="$HOME/.local/state/ml4w-walker"
+MANIFEST="$STATE_DIR/manifest"
+SOCKET="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/elephant/elephant.sock"
+
+usage() {
+    cat <<USAGE
+Usage: ml4w-walker [command]
+
+Commands:
+  start               Start elephant and walker (default, skips what is already running)
+  stop                Stop walker and elephant
+  restart             Stop and start walker and elephant
+  status              Show installed versions, providers and running processes
+  providers           List installed and available providers
+  add <provider>... [--no-deps]
+                      Install providers and the packages they need
+  remove <provider>...
+                      Remove providers
+  update [options]    Update ml4w-walker, walker, elephant and all providers
+                      (options are passed to install.sh, e.g. --force)
+  uninstall           Remove walker, elephant and ml4w-walker
+  help                Show this help
+
+Logs are written to $STATE_DIR.
+USAGE
+}
+
+info() { echo ":: $*"; }
+die() {
+    echo ":: ERROR: $*" >&2
+    exit 1
+}
+
+manifest_get() {
+    [ -f "$MANIFEST" ] || return 0
+    grep -E "^$1=" "$MANIFEST" | head -n1 | cut -d= -f2- || true
+}
+
+require_installed() {
+    [ -f "$MANIFEST" ] && [ -x "$BIN_DIR/elephant" ] && [ -x "$BIN_DIR/walker" ] ||
+        die "walker and elephant are not installed. Run $INSTALL_DIR/install.sh first."
+}
+
+# PIDs of processes running $BIN_DIR/<name>, not other installations
+own_pids() {
+    local name="$1" pid
+    for pid in $(pgrep -x "$name" 2>/dev/null || true); do
+        if [ "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" = "$BIN_DIR/$name" ]; then
+            echo "$pid"
+        fi
+    done
+}
+
+elephant_pids() { own_pids elephant; }
+walker_pids() { own_pids walker; }
+
+start() {
+    require_installed
+    mkdir -p "$STATE_DIR"
+
+    if [ -n "$(elephant_pids)" ]; then
+        info "elephant is already running"
+    else
+        info "Starting elephant"
+        setsid -f "$BIN_DIR/elephant" >"$STATE_DIR/elephant.log" 2>&1 </dev/null
+        # walker needs the elephant socket, so wait up to 5 seconds for it
+        for _ in $(seq 50); do
+            [ -S "$SOCKET" ] && [ -n "$(elephant_pids)" ] && break
+            sleep 0.1
+        done
+        if [ -z "$(elephant_pids)" ]; then
+            tail -n 20 "$STATE_DIR/elephant.log" >&2 || true
+            die "elephant did not start. See $STATE_DIR/elephant.log"
+        fi
+    fi
+
+    if [ -n "$(walker_pids)" ]; then
+        info "walker is already running"
+    else
+        info "Starting walker"
+        setsid -f "$BIN_DIR/walker" --gapplication-service >"$STATE_DIR/walker.log" 2>&1 </dev/null
+    fi
+}
+
+stop() {
+    local pids
+    pids="$(walker_pids) $(elephant_pids)"
+    if [ -z "${pids// /}" ]; then
+        info "walker and elephant are not running"
+        return
+    fi
+    info "Stopping walker and elephant"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    for _ in $(seq 30); do
+        [ -z "$(walker_pids)$(elephant_pids)" ] && return
+        sleep 0.1
+    done
+    die "walker or elephant did not stop"
+}
+
+is_running() {
+    [ -n "$(elephant_pids)$(walker_pids)" ]
+}
+
+status() {
+    local rev pid
+    rev="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    printf '%-12s %s\n' "ml4w-walker" "$rev ($INSTALL_DIR)"
+    pid="$(elephant_pids | tr '\n' ' ')"
+    printf '%-12s %-10s %s\n' "elephant" "$(manifest_get elephant)" "${pid:+running (pid ${pid% })}"
+    pid="$(walker_pids | tr '\n' ' ')"
+    printf '%-12s %-10s %s\n' "walker" "$(manifest_get walker)" "${pid:+running (pid ${pid% })}"
+    printf '%-12s %s\n' "providers" "$(manifest_get providers | sed 's/,/, /g')"
+}
+
+providers() {
+    local installed p mark
+    installed=",$(manifest_get providers),"
+    info "Providers (* = installed):"
+    for p in $("$INSTALL_DIR/install.sh" --list-providers); do
+        mark=" "
+        case "$installed" in *",$p,"*) mark="*" ;; esac
+        echo "  $mark $p"
+    done
+}
+
+# Run install.sh from the repository and restart walker and elephant if they were running
+run_install() {
+    local was_running=0
+    is_running && was_running=1
+    ML4W_WALKER_MANAGED=1 "$INSTALL_DIR/install.sh" "$@"
+    if [ "$was_running" = 1 ]; then
+        stop
+        start
+    fi
+}
+
+# Split arguments into provider names (NAMES) and install.sh options (OPTIONS)
+split_args() {
+    NAMES=()
+    OPTIONS=()
+    local a p
+    for a in "$@"; do
+        case "$a" in
+            -*) OPTIONS+=("$a") ;;
+            *) for p in ${a//,/ }; do NAMES+=("$p"); done ;;
+        esac
+    done
+}
+
+# Install the given provider list, keeping the installed walker and elephant versions
+change_providers() {
+    local list="$1"
+    shift
+    run_install --providers "$list" \
+        --elephant-version "$(manifest_get elephant)" \
+        --walker-version "$(manifest_get walker)" "$@"
+}
+
+add() {
+    local list p
+    require_installed
+    split_args "$@"
+    [ ${#NAMES[@]} -gt 0 ] || die "Usage: ml4w-walker add <provider>... [--no-deps]"
+    list="$(manifest_get providers)"
+    for p in "${NAMES[@]}"; do
+        case ",$list," in
+            *",$p,"*) info "$p is already installed" ;;
+            *) list="$list,$p" ;;
+        esac
+    done
+    [ "$list" != "$(manifest_get providers)" ] || return 0
+    change_providers "$list" ${OPTIONS[@]+"${OPTIONS[@]}"}
+}
+
+remove() {
+    local list p new=""
+    require_installed
+    split_args "$@"
+    [ ${#NAMES[@]} -gt 0 ] || die "Usage: ml4w-walker remove <provider>..."
+    list="$(manifest_get providers)"
+    IFS=',' read -ra installed <<<"$list"
+    for p in "${installed[@]}"; do
+        case " ${NAMES[*]} " in
+            *" $p "*) ;;
+            *) new="${new:+$new,}$p" ;;
+        esac
+    done
+    [ "$new" != "$list" ] || die "None of these providers is installed: ${NAMES[*]}"
+    [ -n "$new" ] || die "At least one provider must stay installed"
+    # Removing providers needs no new packages
+    change_providers "$new" --no-deps
+}
+
+update() {
+    require_installed
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        info "Updating ml4w-walker in $INSTALL_DIR"
+        git -C "$INSTALL_DIR" pull --ff-only --quiet || die "Could not update $INSTALL_DIR"
+    fi
+    # Run the updated install.sh from a new process
+    run_install --providers "$(manifest_get providers)" "$@"
+}
+
+main() {
+    local command="${1:-start}"
+    [ $# -gt 0 ] && shift
+
+    case "$command" in
+        start) start ;;
+        stop) stop ;;
+        restart)
+            stop
+            start
+            ;;
+        status) status ;;
+        providers) providers ;;
+        add) add "$@" ;;
+        remove) remove "$@" ;;
+        update) update "$@" ;;
+        uninstall) exec "$INSTALL_DIR/uninstall.sh" ;;
+        help | -h | --help) usage ;;
+        *)
+            usage >&2
+            die "Unknown command: $command"
+            ;;
+    esac
+}
+
+main "$@"

@@ -27,15 +27,20 @@ curl -sSL https://raw.githubusercontent.com/mylinuxforwork/ml4w-walker/main/inst
 
 The script:
 
-1. Installs the libraries Walker needs (GTK4, gtk4-layer-shell, poppler-glib) and
+1. Clones ml4w-walker into `$HOME/.local/share/ml4w-walker` and links the
+   `ml4w-walker` command into `$HOME/.local/bin`.
+2. Installs the libraries Walker needs (GTK4, gtk4-layer-shell, poppler-glib) and
    the tools your providers need with your package manager. This step uses `sudo`.
-2. Downloads the latest Walker and Elephant release binaries from GitHub. AUR
+3. Downloads the latest Walker and Elephant release binaries from GitHub. AUR
    or distribution packages of Walker and Elephant are not used.
-3. Installs `walker` and `elephant` into `$HOME/.local/bin` and the providers
+4. Installs `walker` and `elephant` into `$HOME/.local/bin` and the providers
    into `$HOME/.config/elephant/providers`.
 
-Run it again to update. Nothing is downloaded if the installed versions are
-already the latest. The provider list you pass always replaces the previous one:
+Requires `git`, `curl` and `tar`.
+
+After the installation, use the [`ml4w-walker` command](#the-ml4w-walker-command)
+to start, update and add or remove providers. Running the install script again
+works as well: the provider list you pass replaces the previous one, and
 providers that are missing from the list are removed.
 
 `$HOME/.local/bin` must be in your `$PATH`. Most distributions add it by default.
@@ -92,29 +97,48 @@ Instead of `--providers` you can also set `ML4W_WALKER_PROVIDERS`.
 
 Elephant disables a provider when the tool it needs is missing.
 
-## Start
-
-Elephant must run before Walker. The ML4W Dotfiles start both from
-`ml4w-autostart`. To start them yourself, add these lines to your autostart,
-Elephant first:
+## The ml4w-walker command
 
 ```bash
-~/.local/bin/elephant &
-~/.local/bin/walker --gapplication-service &
+ml4w-walker [command]
 ```
 
-Walker then runs in the background and opens with:
+| Command | Description |
+|---|---|
+| `start` | Start Elephant and then Walker. Default when no command is given. Skips what is already running |
+| `stop` | Stop Walker and Elephant |
+| `restart` | Stop and start Walker and Elephant |
+| `status` | Show the installed versions, providers and running processes |
+| `providers` | List all providers and mark the installed ones |
+| `add <provider>...` | Install providers and the packages they need. Add `--no-deps` to skip the packages |
+| `remove <provider>...` | Remove providers |
+| `update` | Update ml4w-walker, Walker, Elephant and all providers. Options are passed to `install.sh`, e.g. `--force` |
+| `uninstall` | Remove Walker, Elephant and ml4w-walker |
+| `help` | Show the help |
+
+Providers can be separated by spaces or commas, e.g. `ml4w-walker add calc clipboard`.
+
+`add`, `remove` and `update` restart Walker and Elephant if they were running.
+`add` and `remove` keep the installed Walker and Elephant versions; only
+`update` installs new versions.
+
+Elephant and Walker write their output to `~/.local/state/ml4w-walker/elephant.log`
+and `walker.log`.
+
+## Start
+
+The ML4W Dotfiles start Walker and Elephant from `ml4w-autostart`. To start them
+yourself, add this line to your autostart:
+
+```bash
+~/.local/bin/ml4w-walker
+```
+
+It starts Elephant, waits until it is ready and then starts Walker in the
+background. Open the launcher with:
 
 ```bash
 walker
-```
-
-After an update, restart both so the new version is used:
-
-```bash
-pkill -x walker; pkill -x elephant
-~/.local/bin/elephant &
-~/.local/bin/walker --gapplication-service &
 ```
 
 ## Configuration
@@ -129,8 +153,8 @@ The script does not change your configuration.
 ## Troubleshooting
 
 **A provider does not show up.** Run `elephant listproviders` while Elephant is
-running. If the provider is missing, start `elephant --debug` in a terminal and
-look for errors.
+running. If the provider is missing, check `~/.local/state/ml4w-walker/elephant.log`
+or run `ml4w-walker stop` and start `elephant --debug` in a terminal.
 
 **Walker or Elephant from a package is still installed.** Elephant also loads
 providers from `/usr/lib/elephant`, and those do not work with the Elephant from
@@ -144,10 +168,11 @@ sudo pacman -Rns $(pacman -Qqs '^(elephant|walker)')
 ## Uninstall
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/mylinuxforwork/ml4w-walker/main/uninstall.sh | bash
+ml4w-walker uninstall
 ```
 
-This stops Walker and Elephant, removes both binaries, the providers installed by
-the script and `~/.local/share/ml4w-walker`. Your configuration in
-`~/.config/elephant` and `~/.config/walker` and the distribution packages are
-kept. Remove the lines from your autostart yourself.
+This stops Walker and Elephant, and removes both binaries, the providers
+installed by the script, the `ml4w-walker` command, `~/.local/share/ml4w-walker`
+and `~/.local/state/ml4w-walker`. Your configuration in `~/.config/elephant` and
+`~/.config/walker` and the distribution packages are kept. Remove `ml4w-walker`
+from your autostart yourself.

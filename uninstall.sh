@@ -7,7 +7,8 @@ set -euo pipefail
 
 BIN_DIR="$HOME/.local/bin"
 PROVIDER_DIR="$HOME/.config/elephant/providers"
-STATE_DIR="$HOME/.local/share/ml4w-walker"
+INSTALL_DIR="$HOME/.local/share/ml4w-walker"
+STATE_DIR="$HOME/.local/state/ml4w-walker"
 MANIFEST="$STATE_DIR/manifest"
 
 # Stop processes that run the binary from $BIN_DIR, not other installations
@@ -24,17 +25,27 @@ stop_binary() {
 main() {
     local providers p
 
-    if [ ! -f "$MANIFEST" ]; then
-        echo ":: Nothing to do: $MANIFEST does not exist."
+    # Earlier versions kept the manifest in $INSTALL_DIR
+    if [ ! -f "$MANIFEST" ] && [ -f "$INSTALL_DIR/manifest" ]; then
+        MANIFEST="$INSTALL_DIR/manifest"
+    fi
+
+    if [ ! -f "$MANIFEST" ] && [ ! -d "$INSTALL_DIR" ] && [ ! -L "$BIN_DIR/ml4w-walker" ]; then
+        echo ":: Nothing to do: ml4w-walker is not installed."
         exit 0
     fi
 
-    providers="$(grep -E '^providers=' "$MANIFEST" | head -n1 | cut -d= -f2- || true)"
+    providers=""
+    if [ -f "$MANIFEST" ]; then
+        providers="$(grep -E '^providers=' "$MANIFEST" | head -n1 | cut -d= -f2- || true)"
+    fi
 
     stop_binary walker
     stop_binary elephant
 
+    # Without a manifest the binaries may belong to another installation
     for bin in walker elephant; do
+        [ -f "$MANIFEST" ] || continue
         if [ -f "$BIN_DIR/$bin" ]; then
             echo ":: Removing $BIN_DIR/$bin"
             rm -f "$BIN_DIR/$bin"
@@ -50,13 +61,22 @@ main() {
     done
     rmdir "$PROVIDER_DIR" 2>/dev/null || true
 
-    echo ":: Removing $STATE_DIR"
-    rm -rf "$STATE_DIR"
+    if [ -L "$BIN_DIR/ml4w-walker" ]; then
+        echo ":: Removing $BIN_DIR/ml4w-walker"
+        rm -f "$BIN_DIR/ml4w-walker"
+    fi
+
+    for dir in "$INSTALL_DIR" "$STATE_DIR"; do
+        if [ -d "$dir" ]; then
+            echo ":: Removing $dir"
+            rm -rf "$dir"
+        fi
+    done
     echo ":: Done."
 
     echo ":: Your configuration in ~/.config/elephant and ~/.config/walker was kept. Remove it manually if you no longer need it."
     echo ":: Distribution packages installed as dependencies were kept."
-    echo ":: Remove the elephant and walker lines from your autostart."
+    echo ":: Remove ml4w-walker from your autostart."
 }
 
 main "$@"
