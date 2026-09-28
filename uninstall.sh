@@ -9,16 +9,19 @@ BIN_DIR="$HOME/.local/bin"
 PROVIDER_DIR="$HOME/.config/elephant/providers"
 INSTALL_DIR="$HOME/.local/share/ml4w-walker"
 STATE_DIR="$HOME/.local/state/ml4w-walker"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ml4w-walker"
 MANIFEST="$STATE_DIR/manifest"
 
 # Stop processes that run the binary from $BIN_DIR, not other installations
 stop_binary() {
     local name="$1" pid
     for pid in $(pgrep -x "$name" 2>/dev/null || true); do
-        if [ "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" = "$BIN_DIR/$name" ]; then
-            echo ":: Stopping $name ($pid)"
-            kill "$pid" 2>/dev/null || true
-        fi
+        case "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" in
+            "$BIN_DIR/$name" | "$BIN_DIR/$name (deleted)")
+                echo ":: Stopping $name ($pid)"
+                kill "$pid" 2>/dev/null || true
+                ;;
+        esac
     done
 }
 
@@ -66,7 +69,7 @@ main() {
         rm -f "$BIN_DIR/ml4w-walker"
     fi
 
-    for dir in "$INSTALL_DIR" "$STATE_DIR"; do
+    for dir in "$INSTALL_DIR" "$STATE_DIR" "$CACHE_DIR"; do
         if [ -d "$dir" ]; then
             echo ":: Removing $dir"
             rm -rf "$dir"

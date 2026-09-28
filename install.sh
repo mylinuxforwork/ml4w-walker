@@ -17,6 +17,8 @@ REPO_URL="${ML4W_WALKER_REPO:-https://github.com/mylinuxforwork/ml4w-walker}"
 INSTALL_DIR="$HOME/.local/share/ml4w-walker"
 STATE_DIR="$HOME/.local/state/ml4w-walker"
 MANIFEST="$STATE_DIR/manifest"
+# Sources, toolchains and build caches for builds from source
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ml4w-walker"
 
 DEFAULT_PROVIDERS="desktopapplications,menus"
 MIN_GLIBC="2.39"
@@ -34,8 +36,13 @@ ELEPHANT_VERSION="latest"
 WALKER_VERSION="latest"
 INSTALL_DEPS=1
 FORCE=0
+FROM_SOURCE=0
+FORCE_BINARIES=0
 DISTRO=""
 TMP_DIR=""
+# "binary" downloads release binaries (x86_64), "source" builds them (aarch64)
+MODE=""
+GO_ARCH=""
 
 usage() {
     cat <<EOF
@@ -50,6 +57,10 @@ Options:
   --walker-version TAG     Install a specific walker release (default: latest)
   --no-deps                Do not install distribution packages
   --force                  Download and reinstall even if up to date
+  --from-source            Build walker and elephant from source instead of
+                           downloading release binaries (always on aarch64).
+                           Later runs keep building from source.
+  --binaries               Switch back to release binaries (x86_64 only)
   --list-providers         List available providers and exit
   -h, --help               Show this help
 
@@ -99,6 +110,15 @@ parse_args() {
                 ;;
             --force)
                 FORCE=1
+                shift
+                ;;
+            --from-source)
+                FROM_SOURCE=1
+                shift
+                ;;
+            --binaries)
+                FROM_SOURCE=0
+                FORCE_BINARIES=1
                 shift
                 ;;
             --list-providers)
@@ -169,17 +189,37 @@ preflight() {
     local arch glibc
 
     arch="$(uname -m)"
-    [ "$arch" = "x86_64" ] || die "Only x86_64 is supported (walker and elephant publish no $arch builds)."
+    case "$arch" in
+        x86_64)
+            GO_ARCH="amd64"
+            MODE="binary"
+            # Keep building from source if the installation was built from source
+            if [ "$FROM_SOURCE" = 1 ] ||
+                { [ "$FORCE_BINARIES" = 0 ] && [ "$(manifest_get mode)" = "source" ]; }; then
+                MODE="source"
+            fi
+            ;;
+        aarch64 | arm64)
+            # walker and elephant publish no ARM release binaries
+            [ "$FORCE_BINARIES" = 0 ] || die "There are no release binaries for $arch."
+            GO_ARCH="arm64"
+            MODE="source"
+            ;;
+        *) die "$arch is not supported. Supported are x86_64 and aarch64." ;;
+    esac
 
     for cmd in curl tar git; do
         command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required but not installed."
     done
 
-    glibc="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
-    if [ -z "$glibc" ]; then
-        warn "Could not detect the glibc version. Walker needs glibc $MIN_GLIBC or newer."
-    elif ! version_ge "$glibc" "$MIN_GLIBC"; then
-        die "glibc $glibc is too old. Walker needs glibc $MIN_GLIBC or newer."
+    # The release binaries are built against glibc 2.39, own builds against the system glibc
+    if [ "$MODE" = "binary" ]; then
+        glibc="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+        if [ -z "$glibc" ]; then
+            warn "Could not detect the glibc version. Walker needs glibc $MIN_GLIBC or newer."
+        elif ! version_ge "$glibc" "$MIN_GLIBC"; then
+            die "glibc $glibc is too old. Walker needs glibc $MIN_GLIBC or newer."
+        fi
     fi
 
     for dir in /usr/lib/elephant /usr/lib64/elephant /usr/local/lib/elephant /usr/local/lib64/elephant; do
@@ -198,6 +238,17 @@ base_packages() {
         fedora) echo "gtk4 gtk4-layer-shell poppler-glib" ;;
         opensuse) echo "libgtk-4-1 libgtk4-layer-shell0 libpoppler-glib8" ;;
         ubuntu) echo "libgtk-4-1 libgtk4-layer-shell0 libpoppler-glib8t64" ;;
+    esac
+}
+
+# Distribution packages needed to build walker and elephant from source.
+# Rust and Go are installed by the script itself, see setup_rust and setup_go.
+build_packages() {
+    case "$DISTRO" in
+        arch) echo "base-devel gtk4 gtk4-layer-shell poppler-glib" ;;
+        fedora) echo "gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel poppler-glib-devel" ;;
+        opensuse) echo "gcc pkgconf gtk4-devel gtk4-layer-shell-devel libpoppler-glib-devel" ;;
+        ubuntu) echo "build-essential pkg-config libgtk-4-dev libgtk4-layer-shell-dev libpoppler-glib-dev" ;;
     esac
 }
 
@@ -261,6 +312,9 @@ install_dependencies() {
     fi
 
     pkgs="$(base_packages)"
+    if [ "$MODE" = "source" ]; then
+        pkgs="$pkgs $(build_packages)"
+    fi
     IFS=',' read -ra list <<<"$PROVIDERS"
     for p in "${list[@]}"; do
         pkgs="$pkgs $(provider_packages "$p")"
@@ -346,6 +400,107 @@ fetch() {
     rm -f "$TMP_DIR/$asset"
 }
 
+# Clone the release tag $2 of $1 into $3
+checkout_source() {
+    local repo="$1" tag="$2" dir="$3"
+    info "Fetching $repo $tag"
+    rm -rf "$dir"
+    mkdir -p "$(dirname "$dir")"
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$tag" \
+        "https://github.com/$repo" "$dir" || die "Could not clone $repo $tag"
+}
+
+# Install the Go version required by go.mod into the cache and set GO
+setup_go() {
+    local gomod="$1" version dir
+    version="$(grep -E '^toolchain go[0-9]' "$gomod" | head -n1 | sed 's/^toolchain go//' || true)"
+    if [ -z "$version" ]; then
+        version="$(grep -E '^go [0-9]' "$gomod" | head -n1 | cut -d' ' -f2)"
+    fi
+    [ -n "$version" ] || die "Could not read the Go version from $gomod"
+    # go.mod may name only "1.x"; the first release of it is "1.x.0"
+    case "$version" in
+        *.*.*) ;;
+        *) version="$version.0" ;;
+    esac
+
+    dir="$CACHE_DIR/toolchains/go$version"
+    if [ ! -x "$dir/bin/go" ]; then
+        info "Downloading Go $version"
+        rm -rf "$CACHE_DIR"/toolchains/go*
+        mkdir -p "$dir"
+        curl -fsSL --retry 3 "https://go.dev/dl/go$version.linux-$GO_ARCH.tar.gz" |
+            tar -xz -C "$dir" --strip-components=1 || die "Could not download Go $version"
+    fi
+    GO="$dir/bin/go"
+}
+
+# Install Rust with rustup into the cache, so an existing Rust setup is not touched
+setup_rust() {
+    export RUSTUP_HOME="$CACHE_DIR/toolchains/rustup"
+    export CARGO_HOME="$CACHE_DIR/toolchains/cargo"
+    if [ -x "$CARGO_HOME/bin/rustup" ]; then
+        info "Updating Rust"
+        "$CARGO_HOME/bin/rustup" update stable --no-self-update >/dev/null 2>&1 ||
+            warn "Could not update Rust, using the installed version."
+    else
+        info "Installing Rust into $CACHE_DIR/toolchains"
+        # The private install does not conflict with a Rust from the distribution
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs |
+            RUSTUP_INIT_SKIP_PATH_CHECK=yes sh -s -- -y --quiet --no-modify-path --profile minimal --default-toolchain stable >/dev/null ||
+            die "Could not install Rust"
+    fi
+}
+
+# Build elephant and the given providers into the staging dir.
+# Go plugins only load into the elephant binary they were built with, so
+# elephant is always built together with its providers.
+build_elephant() {
+    local tag="$1" p
+    shift
+    local src="$CACHE_DIR/src/elephant"
+
+    checkout_source "$ELEPHANT_REPO" "$tag" "$src"
+    setup_go "$src/go.mod"
+
+    export GOPATH="$CACHE_DIR/go" GOCACHE="$CACHE_DIR/go-build"
+    export GOFLAGS="-modcacherw" GOTOOLCHAIN="local" CGO_ENABLED=1
+
+    info "Building elephant $tag"
+    (cd "$src" && "$GO" build -trimpath -ldflags="-s -w" -o "$TMP_DIR/elephant" ./cmd/elephant/elephant.go) ||
+        die "Building elephant failed"
+    for p in "$@"; do
+        info "Building provider $p"
+        (cd "$src" && "$GO" build -trimpath -ldflags="-s -w" -buildmode=plugin \
+            -o "$TMP_DIR/$p.so" "./internal/providers/$p") || die "Building provider $p failed"
+    done
+}
+
+build_walker() {
+    local tag="$1"
+    local src="$CACHE_DIR/src/walker"
+
+    checkout_source "$WALKER_REPO" "$tag" "$src"
+    setup_rust
+
+    info "Building walker $tag (this takes a while)"
+    (cd "$src" && CARGO_TARGET_DIR="$CACHE_DIR/target" "$CARGO_HOME/bin/cargo" build --release --locked) ||
+        die "Building walker failed"
+    cp "$CACHE_DIR/target/release/walker" "$TMP_DIR/walker"
+    strip "$TMP_DIR/walker" 2>/dev/null || true
+}
+
+# True if a process runs $BIN_DIR/<name>, not another installation
+own_running() {
+    local pid
+    for pid in $(pgrep -x "$1" 2>/dev/null || true); do
+        case "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" in
+            "$BIN_DIR/$1" | "$BIN_DIR/$1 (deleted)") return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Copy next to the target and rename, so running binaries are not touched
 place() {
     local src="$1" dest="$2" mode="$3"
@@ -360,7 +515,7 @@ main() {
     preflight
     install_self
 
-    local elephant_tag walker_tag old_elephant old_walker old_providers
+    local elephant_tag walker_tag old_elephant old_walker old_providers old_mode
     local update_elephant=0 update_walker=0 p
     local -a providers new_providers=() removed_providers=()
 
@@ -371,12 +526,24 @@ main() {
     old_elephant="$(manifest_get elephant)"
     old_walker="$(manifest_get walker)"
     old_providers="$(manifest_get providers)"
+    old_mode="$(manifest_get mode)"
 
+    # Switching between binaries and own builds replaces everything
+    if [ -n "$old_mode" ] && [ "$old_mode" != "$MODE" ]; then
+        FORCE=1
+    fi
     if [ "$FORCE" = 1 ] || [ "$elephant_tag" != "$old_elephant" ] || [ ! -x "$BIN_DIR/elephant" ]; then
         update_elephant=1
     fi
     if [ "$FORCE" = 1 ] || [ "$walker_tag" != "$old_walker" ] || [ ! -x "$BIN_DIR/walker" ]; then
         update_walker=1
+    fi
+    # A newly built provider only loads into an elephant from the same build
+    if [ "$MODE" = "source" ]; then
+        IFS=',' read -ra providers <<<"$PROVIDERS"
+        for p in "${providers[@]}"; do
+            [ -f "$PROVIDER_DIR/$p.so" ] || update_elephant=1
+        done
     fi
 
     IFS=',' read -ra providers <<<"$PROVIDERS"
@@ -405,18 +572,30 @@ main() {
         TMP_DIR="$(mktemp -d)"
         trap cleanup EXIT
 
-        # Download everything first, so a failed download leaves the old install intact
-        if [ "$update_elephant" = 1 ]; then
-            fetch "$ELEPHANT_REPO" "$elephant_tag" "elephant-linux-amd64.tar.gz" \
-                "elephant-linux-amd64" "elephant"
-        fi
-        for p in "${new_providers[@]}"; do
-            fetch "$ELEPHANT_REPO" "$elephant_tag" "$p-linux-amd64.tar.gz" \
-                "$p-linux-amd64.so" "$p.so"
-        done
-        if [ "$update_walker" = 1 ]; then
-            fetch "$WALKER_REPO" "$walker_tag" "walker-$walker_tag-x86_64-unknown-linux-gnu.tar.gz" \
-                "walker" "walker"
+        # Download or build everything first, so a failure leaves the old install intact
+        if [ "$MODE" = "source" ]; then
+            if [ "$update_elephant" = 1 ] || [ "$update_walker" = 1 ]; then
+                info "Building from source. This needs about 3 GB in $CACHE_DIR and can take a long time."
+            fi
+            if [ "$update_elephant" = 1 ]; then
+                build_elephant "$elephant_tag" "${new_providers[@]}"
+            fi
+            if [ "$update_walker" = 1 ]; then
+                build_walker "$walker_tag"
+            fi
+        else
+            if [ "$update_elephant" = 1 ]; then
+                fetch "$ELEPHANT_REPO" "$elephant_tag" "elephant-linux-amd64.tar.gz" \
+                    "elephant-linux-amd64" "elephant"
+            fi
+            for p in "${new_providers[@]}"; do
+                fetch "$ELEPHANT_REPO" "$elephant_tag" "$p-linux-amd64.tar.gz" \
+                    "$p-linux-amd64.so" "$p.so"
+            done
+            if [ "$update_walker" = 1 ]; then
+                fetch "$WALKER_REPO" "$walker_tag" "walker-$walker_tag-x86_64-unknown-linux-gnu.tar.gz" \
+                    "walker" "walker"
+            fi
         fi
 
         mkdir -p "$BIN_DIR" "$PROVIDER_DIR" "$STATE_DIR"
@@ -444,12 +623,12 @@ main() {
 elephant=$elephant_tag
 walker=$walker_tag
 providers=$PROVIDERS
+mode=$MODE
 EOF
         info "walker and elephant installed successfully."
 
         # ml4w-walker restarts them itself after update/add/remove
-        if [ -z "${ML4W_WALKER_MANAGED:-}" ] &&
-            { pgrep -x elephant >/dev/null 2>&1 || pgrep -x walker >/dev/null 2>&1; }; then
+        if [ -z "${ML4W_WALKER_MANAGED:-}" ] && { own_running elephant || own_running walker; }; then
             info "elephant or walker is running. Restart both to use the new version:"
             info "  ml4w-walker restart"
         fi

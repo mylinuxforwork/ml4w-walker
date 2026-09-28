@@ -5,12 +5,15 @@ and its backend [Elephant](https://github.com/abenz1267/elephant), including the
 Elephant providers you choose. Part of
 [ML4W OS](https://github.com/mylinuxforwork/dotfiles), but it also works on its own.
 
-Supported distributions (x86_64 only):
+Supported distributions:
 
-- Arch Linux
+- Arch Linux (and Arch Linux ARM)
 - Fedora
 - openSUSE Tumbleweed
 - Ubuntu 25.10 and newer (26.04 LTS)
+
+Supported processors: x86_64 and aarch64 (ARM64). See [ARM](#arm) for how
+aarch64 differs.
 
 ## Installation
 
@@ -31,8 +34,9 @@ The script:
    `ml4w-walker` command into `$HOME/.local/bin`.
 2. Installs the libraries Walker needs (GTK4, gtk4-layer-shell, poppler-glib) and
    the tools your providers need with your package manager. This step uses `sudo`.
-3. Downloads the latest Walker and Elephant release binaries from GitHub. AUR
-   or distribution packages of Walker and Elephant are not used.
+3. Downloads the latest Walker and Elephant release binaries from GitHub, or
+   builds them from source on [ARM](#arm). AUR or distribution packages of
+   Walker and Elephant are not used.
 4. Installs `walker` and `elephant` into `$HOME/.local/bin` and the providers
    into `$HOME/.config/elephant/providers`.
 
@@ -60,6 +64,8 @@ export PATH="$HOME/.local/bin:$PATH"
 | `--walker-version TAG` | Install a specific Walker release, e.g. `v2.17.1`. Default: latest |
 | `--no-deps` | Do not install distribution packages (no `sudo` needed) |
 | `--force` | Download and reinstall even if up to date |
+| `--from-source` | Build Walker and Elephant from source instead of downloading release binaries. Always used on aarch64 |
+| `--binaries` | Switch an x86_64 installation built with `--from-source` back to release binaries |
 | `--list-providers` | List all available providers |
 | `-h`, `--help` | Show the help |
 
@@ -141,6 +147,29 @@ background. Open the launcher with:
 walker
 ```
 
+## ARM
+
+Walker and Elephant publish release binaries for x86_64 only. On aarch64 the
+script builds both from source instead:
+
+- It installs the build dependencies (compiler and GTK4, gtk4-layer-shell and
+  poppler-glib development packages) with your package manager.
+- It installs the Rust and Go versions Walker and Elephant need into
+  `~/.cache/ml4w-walker/toolchains`. An existing Rust or Go setup is not used
+  or changed.
+- Sources and build caches are kept in `~/.cache/ml4w-walker` (about 3 GB), so
+  later builds are faster. You can delete the folder at any time; the next
+  build downloads everything again.
+
+The first installation takes several minutes, much longer on small boards like
+the Raspberry Pi. `ml4w-walker update` and `ml4w-walker add` build again, and
+`add` rebuilds Elephant and all providers, because Elephant only loads providers
+from the same build. `remove` does not build anything.
+
+The same works on x86_64 with `--from-source`. Later runs, including
+`ml4w-walker update` and `add`, keep building from source until you pass
+`--binaries`.
+
 ## Configuration
 
 - Elephant: `~/.config/elephant/`. Run `elephant generatedoc` for the documentation
@@ -172,7 +201,8 @@ ml4w-walker uninstall
 ```
 
 This stops Walker and Elephant, and removes both binaries, the providers
-installed by the script, the `ml4w-walker` command, `~/.local/share/ml4w-walker`
-and `~/.local/state/ml4w-walker`. Your configuration in `~/.config/elephant` and
-`~/.config/walker` and the distribution packages are kept. Remove `ml4w-walker`
-from your autostart yourself.
+installed by the script, the `ml4w-walker` command, `~/.local/share/ml4w-walker`,
+`~/.local/state/ml4w-walker` and the build cache `~/.cache/ml4w-walker`. Your
+configuration in `~/.config/elephant` and `~/.config/walker` and the
+distribution packages are kept. Remove `ml4w-walker` from your autostart
+yourself.
