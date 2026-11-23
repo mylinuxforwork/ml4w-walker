@@ -53,13 +53,44 @@ require_installed() {
         die "walker and elephant are not installed. Run $INSTALL_DIR/install.sh first."
 }
 
-# PIDs of processes running $BIN_DIR/<name>, not other installations.
+# Whether process $2 is the elephant daemon or the walker service and not a
+# client call of the same binary, such as `elephant query` or `walker -m
+# clipboard`. Without this a client running at login (e.g. a status bar
+# polling `elephant query`) is taken for the daemon and start skips it.
+is_daemon() {
+    local name="$1" pid="$2" args=() i
+    mapfile -d '' -t args 2>/dev/null <"/proc/$pid/cmdline" || return 1
+    case "$name" in
+        walker)
+            for ((i = 1; i < ${#args[@]}; i++)); do
+                [ "${args[i]}" = "--gapplication-service" ] && return 0
+            done
+            return 1
+            ;;
+        elephant)
+            # The daemon runs without a subcommand, only with global options
+            for ((i = 1; i < ${#args[@]}; i++)); do
+                case "${args[i]}" in
+                    -c | --config) i=$((i + 1)) ;;
+                    -*) ;;
+                    *) return 1 ;;
+                esac
+            done
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# PIDs of the daemons running $BIN_DIR/<name>, not other installations.
 # After an update the old binary of a running process shows as "(deleted)".
 own_pids() {
     local name="$1" pid
     for pid in $(pgrep -x "$name" 2>/dev/null || true); do
         case "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" in
-            "$BIN_DIR/$name" | "$BIN_DIR/$name (deleted)") echo "$pid" ;;
+            "$BIN_DIR/$name" | "$BIN_DIR/$name (deleted)")
+                if is_daemon "$name" "$pid"; then echo "$pid"; fi
+                ;;
         esac
     done
 }
